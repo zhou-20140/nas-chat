@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 下载的文件（运行 /dl 命令下载到本地"下载"文件夹，不提交）
+下载/
+
+# 本地配置文件（含 NAS 路径等私有信息，若不想提交可取消注释）
+# config.json
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/

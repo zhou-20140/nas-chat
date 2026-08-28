@@ -1,0 +1,14 @@
+{
+  "nas_path": "\\\\192.168.31.1\\共享",
+  "sub_path": "chat-text",
+  "default_user": "sga",
+  "poll_interval": 1.0,
+  "files_sub_path": "files",
+  "chat_rooms": [
+    {"id": "chat-room1", "name": "闲聊大厅"},
+    {"id": "chat-room2", "name": "技术讨论"},
+    {"id": "chat-room3", "name": "游戏交流"},
+    {"id": "chat-room4", "name": "生活分享"},
+    {"id": "chat-room5", "name": "工作协作"}
+  ]
+}
