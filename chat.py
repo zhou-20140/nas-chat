@@ -58,6 +58,18 @@ def clear_screen():
     # 光标归位到左上角，并清除从光标到屏幕末尾的内容（整屏重绘用）
     print(HOME + CLEAR_BELOW, end='', flush=True)
 
+def clear_screen_lines(rows):
+    """逐行清屏：光标归位后，对前 rows 行逐行清除再归位。
+    比 \033[J 更可靠，能确保旧的顶部栏等内容被彻底清除。"""
+    out = [HOME]
+    for i in range(rows):
+        out.append(ERASE_LINE)
+        if i < rows - 1:
+            out.append('\n')
+    out.append(HOME)
+    sys.stdout.write(''.join(out))
+    sys.stdout.flush()
+
 def get_chat_file_path(room_id):
     # 每个聊天室一个独立文件：chat-text/<room_id>.txt
     return os.path.join(nas_path, sub_path, f'{room_id}.txt')
@@ -81,6 +93,9 @@ def read_chat_file(room_id):
         line = line.strip()
         if not line:
             continue
+        # 容错解析：某行格式异常（缺冒号）时跳过，避免整批消息读取失败
+        if ':' not in line:
+            continue
         other_user, message = line.split(':', 1)
         new_messages.append((other_user.strip(), message.strip()))
     messages = new_messages
@@ -91,16 +106,39 @@ RESTORE_CURSOR = '\033[u'  # 恢复光标位置
 ERASE_LINE = '\033[2K'   # 清除整行
 MOVE_UP = '\033[1A'      # 光标上移一行
 
-def print_messages():
-    global messages
-    print('------------------chat-------------------')
-    for other_user, message in messages:
-        print(f'{other_user}: {message}')
+# 消息区最大高度（行数），限制顶部栏与输入栏的间距，避免过大
+MAX_MSG_AREA = 15
 
-def print_message_lines(lines):
-    """把多行文本打印到当前光标处（用于后台插入新消息）"""
-    for line in lines:
-        print(line)
+def get_term_height():
+    """获取终端可用的行数；获取失败时回退到 24"""
+    try:
+        return os.get_terminal_size().lines
+    except Exception:
+        return 24
+
+def render_screen(show_prompt=True):
+    """整屏重绘固定布局：
+       - 顶部栏（标题行）固定在第 1 行
+       - 消息区固定高度（最多 MAX_MSG_AREA 行），超出只显示最新几条
+       - 输入栏固定在消息区之后一行
+       顶部栏与输入栏的距离始终一致，且不会因终端过高而间距过大。
+       清屏采用逐行清除，避免旧的顶部栏残留。"""
+    term_h = get_term_height()
+    msg_area = max(min(term_h - 2, MAX_MSG_AREA), 1)  # 消息区行数
+    # 逐行清除，确保旧的顶部栏等内容被彻底清掉
+    clear_screen_lines(term_h)
+    print('-------------------chat-------------------')
+    # 只显示最新 msg_area 条消息，保证输入栏位置固定
+    for other_user, message in messages[-msg_area:]:
+        print(f'{other_user}: {message}')
+    # 用空行把输入栏推到固定位置（标题 1 行 + 消息区 msg_area 行）
+    filled = 1 + min(len(messages), msg_area)
+    for _ in range(filled, msg_area + 1):
+        print('')
+    if show_prompt:
+        print('> ', end='', flush=True)
+    else:
+        sys.stdout.flush()
 
 def send_message(user, message, room_id):
     global messages
@@ -261,28 +299,22 @@ def delete_file(user, number_str):
     return True, f'已删除文件 #{number_str}：{filename}'
 
 def refresh_display():
-    # 整屏重绘：清屏后重新打印全部消息 + 底部输入提示
-    clear_screen()
-    print_messages()
-    print('> ', end='', flush=True)
+    # 整屏重绘固定布局（标题 + 固定消息区 + 底部输入栏）
+    render_screen(show_prompt=True)
 
 def append_new_messages(room_id, shown_count):
-    """把新增消息追加到输入提示上方，并返回新的已显示消息数。
-    使用 ANSI 光标保存/恢复，不打断输入。"""
+    """把新增消息按固定布局重绘屏幕，并返回新的已显示消息数。
+    使用 ANSI 光标保存/恢复，尽量不打断 input() 输入。"""
     global messages
     read_chat_file(room_id)
     new_lines = messages[shown_count:]
     if not new_lines:
         return shown_count
-    # 保存当前光标（input 行末尾）→ 移到消息区 → 打印新消息 → 恢复光标
+    # 保存当前 input 光标位置 → 整屏重绘 → 恢复光标位置
     sys.stdout.write(SAVE_CURSOR)
-    # 清掉输入提示行，避免被新消息覆盖时残留
-    sys.stdout.write(MOVE_UP + ERASE_LINE + '\r')
-    for other_user, message in new_lines:
-        sys.stdout.write(f'{other_user}: {message}\n')
-    # 恢复光标到输入行末尾并重绘提示
+    sys.stdout.flush()
+    render_screen(show_prompt=True)
     sys.stdout.write(RESTORE_CURSOR)
-    sys.stdout.write(ERASE_LINE + '> ')
     sys.stdout.flush()
     return len(messages)
 
@@ -362,21 +394,43 @@ def choose_room():
 def poll_chat_file(room_id, shown_count_holder):
     """后台线程：监测聊天文件是否有新消息。
     检测到变化时，把新增消息追加显示到输入提示上方（不打断 input）。"""
+    nas_error_reported = False
     while True:
         time.sleep(poll_interval)
         try:
             shown = append_new_messages(room_id, shown_count_holder[0])
+            if shown != shown_count_holder[0]:
+                shown_count_holder[0] = shown
+            # NAS 恢复后清除报错标记
+            if nas_error_reported:
+                nas_error_reported = False
+                sys.stdout.write(MOVE_UP + ERASE_LINE + '\r')
+                sys.stdout.write('[提示] 已恢复与 NAS 的连接\n')
+                sys.stdout.write(RESTORE_CURSOR)
+                sys.stdout.write(ERASE_LINE + '> ')
+                sys.stdout.flush()
         except Exception:
-            continue
-        if shown != shown_count_holder[0]:
-            shown_count_holder[0] = shown
+            # NAS 不可用：只提示一次，避免刷屏；持续重试直至恢复
+            if not nas_error_reported:
+                nas_error_reported = True
+                try:
+                    sys.stdout.write(MOVE_UP + ERASE_LINE + '\r')
+                    sys.stdout.write('[警告] NAS 连接失败，正在重试...（请检查网络或共享路径）\n')
+                    sys.stdout.write(RESTORE_CURSOR)
+                    sys.stdout.write(ERASE_LINE + '> ')
+                    sys.stdout.flush()
+                except Exception:
+                    pass
 
 # ============ 主程序 ============
-# 直接使用 config.json 里的 default_user，不再手动输入
-user = config.get('default_user', '')
-if not user.strip():
-    print('错误：config.json 中未设置 default_user 用户名！')
-    exit(1)
+# 优先使用 config.json 里的 default_user；若未设置，则启动时手动输入
+user = config.get('default_user', '').strip()
+if not user:
+    while True:
+        user = input('请输入你的用户名：').strip()
+        if user:
+            break
+        print('用户名不能为空，请重新输入。')
 
 # 选择聊天室
 room = choose_room()
